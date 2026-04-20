@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# HDFS and Spark temporary files
+*.crc
+spark-warehouse/
+metastore_db/
+
+# HBase temporary files
+/tmp/hbase_insert.txt
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env

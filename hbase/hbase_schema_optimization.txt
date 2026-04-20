@@ -1,0 +1,16 @@
+create 'user_activity', 'profile', 'activity'
+
+# Bloom Filter
+disable 'realtime_sales'
+alter 'realtime_sales', { NAME => 'info', BLOOMFILTER => 'ROW' }
+enable 'realtime_sales'
+
+# Compression
+disable 'realtime_sales'
+alter 'realtime_sales', { NAME => 'info', COMPRESSION => 'SNAPPY' }
+enable 'realtime_sales'
+
+# Pre-splitting
+create 'realtime_sales_optimized',
+{ NAME => 'info', BLOOMFILTER => 'ROW', COMPRESSION => 'SNAPPY' },
+SPLITS => ['2000000000000','4000000000000']
