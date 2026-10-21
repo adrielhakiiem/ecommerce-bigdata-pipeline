@@ -1,27 +1,51 @@
-from pyspark.sql import SparkSession
+"""Run a repeatable full-table baseline for comparison with the partitioned query."""
+
+from __future__ import annotations
+
+import argparse
+import logging
 import time
 
-spark = SparkSession.builder \
-    .appName("Baseline_Query") \
-    .enableHiveSupport() \
-    .getOrCreate()
+from pyspark.sql import SparkSession
 
-spark.sql("USE ecommerce_dw")
+LOGGER = logging.getLogger(__name__)
 
-sample_date = spark.sql("SELECT event_date FROM sales_fact LIMIT 1").collect()[0]['event_date']
 
-query = f"""
-SELECT event, COUNT(*) as count
-FROM sales_fact_raw
-WHERE event_date = '{sample_date}'
-GROUP BY event
-"""
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--database", default="ecommerce_dw")
+    parser.add_argument("--table", default="sales_fact")
+    return parser.parse_args()
 
-start_time = time.time()
-result = spark.sql(query)
-result.show()
-end_time = time.time()
 
-print(f"Runtime: {end_time - start_time:.2f} seconds")
+def run(args: argparse.Namespace) -> None:
+    spark = (
+        SparkSession.builder.appName("Baseline_Query")
+        .enableHiveSupport()
+        .getOrCreate()
+    )
+    try:
+        table = f"`{args.database}`.`{args.table}`"
+        query = f"""
+            SELECT event, COUNT(*) AS event_count
+            FROM {table}
+            GROUP BY event
+        """
+        started = time.perf_counter()
+        result = spark.sql(query)
+        rows = result.collect()
+        elapsed = time.perf_counter() - started
 
-spark.stop()
+        LOGGER.info("Rows returned: %d", len(rows))
+        LOGGER.info("Runtime: %.2f seconds", elapsed)
+        result.show(truncate=False)
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+    run(parse_args())

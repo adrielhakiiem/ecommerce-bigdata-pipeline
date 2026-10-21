@@ -1,111 +1,188 @@
-# E-Commerce Big Data Pipeline (Hadoop + Spark + Hive + HBase)
+# E-Commerce Big Data Pipeline
 
-## Overview
-This project implements an end-to-end big data pipeline for analyzing large-scale e-commerce user behavior data. It combines batch and real-time processing using a hybrid architecture.
+An end-to-end batch analytics pipeline for clickstream data, built with
+**Apache Spark, Hadoop HDFS, Hive, Parquet, and HBase**. The project
+demonstrates how to turn raw event data into a partitioned analytical
+dataset, reusable SQL insights, and a bounded low-latency serving view.
 
-The system processes raw clickstream data, transforms it using distributed computing, and enables both analytical insights and low-latency querying.
+![System architecture](assets/system-architecture.png)
 
----
+## Why this project
 
-## System Architecture
+This repository is intentionally focused on the engineering decisions that
+matter in a production-style data platform:
 
-![System Architecture](assets/system-architecture.png)
+- explicit input schemas instead of relying on schema inference;
+- idempotent, parameterized Spark jobs;
+- partitioned Parquet storage for date-based pruning;
+- a separate HBase serving path for recent event lookups;
+- repeatable benchmark scripts with real Spark actions;
+- SQL examples that run against the published warehouse table.
 
-The architecture integrates:
-- **HDFS** for scalable distributed storage  
-- **Apache Spark** for ETL and data processing  
-- **Hive** for batch analytics and reporting  
-- **HBase** for real-time data access  
+## Architecture
 
----
+```text
+CSV files
+   │
+   ▼
+HDFS ──► Spark ETL ──► Hive metastore + partitioned Parquet (sales_fact)
+                           │
+                           ├──► Hive/Spark SQL analytics
+                           └──► HBase serving sample
+```
 
-## Data Model
+![Star schema](assets/star-schema.png)
 
-![Star Schema](assets/star-schema.png)
+| Layer | Technology | Responsibility |
+| --- | --- | --- |
+| Storage | HDFS | Durable storage for raw and processed data |
+| Compute | Apache Spark | Cleaning, deduplication, transformation, and writes |
+| Warehouse | Hive + Parquet | Partitioned analytical table and SQL access |
+| Serving | HBase | Fast key-based access to a bounded event sample |
 
-The warehouse follows a **star schema**:
-- Fact table: `sales_fact`
-- Dimension tables: `dim_users`, `dim_items`, `dim_time`
+## Data model
 
-This design improves query performance and simplifies analytical queries.
+The ETL publishes `ecommerce_dw.sales_fact` with this schema:
 
----
+| Column | Type | Description |
+| --- | --- | --- |
+| `timestamp` | `bigint` | Event time in milliseconds since Unix epoch |
+| `visitorid` | `bigint` | Anonymous visitor identifier |
+| `event` | `string` | Event type, such as `view`, `addtocart`, or `transaction` |
+| `itemid` | `bigint` | Product identifier |
+| `transactionid` | `string` | Optional transaction identifier |
+| `event_date` | `date` | Derived partition column |
 
-## Data Pipeline
+The table is stored as Parquet and partitioned by `event_date`. The included
+SQL examples are in [`sql/analytics_queries.sql`](sql/analytics_queries.sql).
 
-1. **Data Ingestion**
-   - Raw CSV files ingested into HDFS
+## Prerequisites
 
-2. **Data Processing (Spark)**
-   - Data cleaning (null removal, deduplication)
-   - Timestamp transformation → `event_date`
-   - Feature preparation
+- Python 3.9+
+- Java 8, 11, or 17
+- Apache Spark with Hive support
+- Hadoop/HDFS
+- Hive metastore support
+- HBase (only required for the serving step)
 
-3. **Data Storage**
-   - Processed data stored in Hive (Parquet format)
-   - Subset loaded into HBase for real-time access
+Install the Python dependency:
 
----
+```bash
+python -m pip install -r requirements.txt
+```
 
-## Analytics
+The scripts default to a local HDFS deployment at
+`hdfs://localhost:9000`. Every important path and table name can be
+overridden with a command-line option.
 
-The project supports multiple analytical use cases:
+## Quick start
 
-- **Top-N Product Analysis** (most viewed items)
-- **User Activity Analysis** (most active users)
-- **Event Distribution Analysis**
-- **Behavioral Segmentation**
+### 1. Prepare the HDFS layout
 
-All queries are implemented using Hive / Spark SQL.
+Place the source files at:
 
----
+```text
+/data/ecommerce/raw/events/events.csv
+/data/ecommerce/raw/categories/category_tree.csv
+/data/ecommerce/raw/items/item_properties_part1.csv
+/data/ecommerce/raw/items/item_properties_part2.csv
+```
 
-## Performance Optimization
+Only `events.csv` is required by the current ETL job; the other files are
+kept in the layout for the broader warehouse model and future dimensions.
 
-![Performance Summary](assets/performance-summary.png)
+### 2. Run the ETL
 
-Optimizations applied:
-- Partitioning by `event_date`
-- Bucketing by `visitorid`
-- Parquet columnar storage
-- Spark caching & repartitioning
+```bash
+spark-submit src/ecommerce_etl_hdfs.py \
+  --hdfs-root hdfs://localhost:9000/data/ecommerce
+```
 
-### Results
-- Baseline Query Runtime: **8.19 seconds**
-- Optimized Query Runtime: **3.98 seconds**
-- Performance Improvement: **~51.4% faster**
+The job fails safely if `ecommerce_dw.sales_fact` already exists. To
+intentionally replace it:
 
----
+```bash
+spark-submit src/ecommerce_etl_hdfs.py --overwrite
+```
 
-## Repository Structure
+The default behavior avoids dropping the entire database, which protects
+unrelated tables and makes reruns explicit.
 
-- `src/` → PySpark ETL pipeline and performance scripts  
-- `sql/` → Hive / Spark SQL analytical queries  
-- `hbase/` → HBase schema and optimization scripts  
-- `assets/` → Architecture diagrams and performance results  
-- `README.md` → Project documentation  
+### 3. Run analytics
 
----
+```bash
+beeline -e "USE ecommerce_dw; SELECT event, COUNT(*) FROM sales_fact GROUP BY event;"
+```
 
-## Tech Stack
+For more examples, run the statements in
+[`sql/analytics_queries.sql`](sql/analytics_queries.sql).
 
-- Apache Spark (PySpark)
-- Hadoop (HDFS)
-- Hive
-- HBase
-- Python
+### 4. Load a serving sample into HBase
 
----
+```bash
+spark-submit src/load_to_hbase.py \
+  --hbase-table realtime_sales \
+  --limit 10000
+```
 
-## Key Takeaways
+The loader streams the bounded Spark result to the driver, escapes values
+for HBase shell syntax, removes its temporary script, and fails loudly if
+the HBase command returns a non-zero exit code.
 
-- Designed a **hybrid big data architecture** supporting both batch and real-time workloads  
-- Built a **distributed ETL pipeline** for large-scale data processing  
-- Implemented **data modeling (star schema)** for efficient analytics  
-- Applied **performance optimizations** achieving over 50% runtime improvement  
+## Performance experiment
 
----
+Run the full-table baseline and the partition-pruned query separately:
 
-## Notes
+```bash
+spark-submit src/test_baseline_query.py
+spark-submit src/performance_comparison.py
+```
 
-- This repository focuses on implementation and system design
+The optimized query filters on `event_date`, which allows Spark/Hive to
+prune unrelated partitions. Benchmark numbers depend on cluster size,
+file layout, caching, and input volume; the image below records one
+historical local run rather than a universal guarantee.
+
+![Performance summary](assets/performance-summary.png)
+
+## Repository layout
+
+```text
+.
+├── assets/                       # Architecture and benchmark visuals
+├── hbase/                        # HBase schema and tuning notes
+├── sql/                          # Warehouse analytics
+├── src/
+│   ├── ecommerce_etl_hdfs.py     # Raw events -> partitioned Hive table
+│   ├── load_to_hbase.py          # Hive table -> HBase serving sample
+│   ├── performance_comparison.py # Partition-pruned benchmark
+│   └── test_baseline_query.py    # Full-table benchmark
+├── requirements.txt
+└── README.md
+```
+
+## Engineering notes
+
+- **Data quality:** rows missing `timestamp`, `visitorid`, `itemid`, or
+  `event` are rejected; duplicate event keys are removed.
+- **Repeatability:** jobs expose CLI parameters and use structured logging
+  instead of hard-coded print statements.
+- **Safety:** the ETL does not drop databases, and overwrite behavior is
+  opt-in.
+- **Scalability:** Parquet and date partitioning reduce IO for time-bounded
+  queries; HBase loading is explicitly capped with `--limit`.
+- **Operational clarity:** Spark sessions are stopped in `finally` blocks,
+  and external command failures are surfaced to the caller.
+
+## Limitations and next steps
+
+This is a portfolio-scale reference implementation, not a turnkey
+production deployment. A production rollout would add orchestration,
+schema/data-quality metrics, incremental ingestion, secrets/configuration
+management, automated integration tests, and an HBase bulk-load path for
+very large serving datasets.
+
+## License
+
+No license has been selected yet. Add a license before distributing this
+repository for reuse.

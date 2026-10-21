@@ -1,69 +1,112 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, to_date, from_unixtime
+"""Clean the raw e-commerce events and publish a partitioned Hive table."""
 
-print("=" * 80)
-print("ETL PIPELINE START")
-print("=" * 80)
+from __future__ import annotations
 
-# Initialize Spark
-spark = SparkSession.builder \
-    .appName("Ecommerce_Distributed_ETL") \
-    .config("spark.sql.warehouse.dir", "hdfs://localhost:9000/user/hive/warehouse") \
-    .config("spark.hadoop.fs.defaultFS", "hdfs://localhost:9000") \
-    .enableHiveSupport() \
-    .getOrCreate()
+import argparse
+import logging
 
-print("\nReading data from HDFS...")
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import col, from_unixtime, to_date
+from pyspark.sql.types import LongType, StringType, StructField, StructType
 
-df_category = spark.read.csv(
-    "hdfs://localhost:9000/data/ecommerce/raw/categories/category_tree.csv",
-    header=True, inferSchema=True
+LOGGER = logging.getLogger(__name__)
+
+DEFAULT_HDFS_ROOT = "hdfs://localhost:9000/data/ecommerce"
+DEFAULT_WAREHOUSE = "hdfs://localhost:9000/user/hive/warehouse"
+DATABASE = "ecommerce_dw"
+TABLE = "sales_fact"
+
+EVENT_SCHEMA = StructType(
+    [
+        StructField("timestamp", LongType(), True),
+        StructField("visitorid", LongType(), True),
+        StructField("event", StringType(), True),
+        StructField("itemid", LongType(), True),
+        StructField("transactionid", StringType(), True),
+    ]
 )
 
-df_items_1 = spark.read.csv(
-    "hdfs://localhost:9000/data/ecommerce/raw/items/item_properties_part1.csv",
-    header=True, inferSchema=True
-)
 
-df_items_2 = spark.read.csv(
-    "hdfs://localhost:9000/data/ecommerce/raw/items/item_properties_part2.csv",
-    header=True, inferSchema=True
-)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hdfs-root", default=DEFAULT_HDFS_ROOT)
+    parser.add_argument("--warehouse", default=DEFAULT_WAREHOUSE)
+    parser.add_argument("--database", default=DATABASE)
+    parser.add_argument("--table", default=TABLE)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace the target table. By default, fail if it already exists.",
+    )
+    return parser.parse_args()
 
-df_events = spark.read.csv(
-    "hdfs://localhost:9000/data/ecommerce/raw/events/events.csv",
-    header=True, inferSchema=True
-)
 
-print("Data Cleaning...")
-df_clean = df_events.dropna(subset=["timestamp", "visitorid", "itemid", "event"])
-df_clean = df_clean.dropDuplicates(["timestamp", "visitorid", "itemid"])
+def read_events(spark: SparkSession, hdfs_root: str) -> DataFrame:
+    return spark.read.csv(
+        f"{hdfs_root}/raw/events/events.csv",
+        header=True,
+        schema=EVENT_SCHEMA,
+    )
 
-print("Transformation...")
-df_final = df_clean.withColumn(
-    "event_date",
-    to_date(from_unixtime(col("timestamp") / 1000))
-)
 
-df_final = df_final.select(
-    "timestamp",
-    "visitorid",
-    "event",
-    "itemid",
-    "transactionid",
-    "event_date"
-)
+def transform_events(events: DataFrame) -> DataFrame:
+    required_columns = ["timestamp", "visitorid", "itemid", "event"]
+    return (
+        events.dropna(subset=required_columns)
+        .dropDuplicates(["timestamp", "visitorid", "itemid", "event"])
+        .withColumn(
+            "event_date",
+            to_date(from_unixtime(col("timestamp") / 1000)),
+        )
+        .select(
+            "timestamp",
+            "visitorid",
+            "event",
+            "itemid",
+            "transactionid",
+            "event_date",
+        )
+    )
 
-print("Loading into Hive...")
 
-spark.sql("DROP DATABASE IF EXISTS ecommerce_dw CASCADE")
-spark.sql("CREATE DATABASE IF NOT EXISTS ecommerce_dw")
+def build_spark(app_name: str, warehouse: str) -> SparkSession:
+    return (
+        SparkSession.builder.appName(app_name)
+        .config("spark.sql.warehouse.dir", warehouse)
+        .enableHiveSupport()
+        .getOrCreate()
+    )
 
-df_final.write \
-    .mode("overwrite") \
-    .format("parquet") \
-    .saveAsTable("ecommerce_dw.sales_fact")
 
-print("ETL COMPLETED")
+def run(args: argparse.Namespace) -> None:
+    spark = build_spark("Ecommerce_Distributed_ETL", args.warehouse)
+    try:
+        target = f"{args.database}.{args.table}"
+        if spark.catalog.tableExists(target) and not args.overwrite:
+            raise RuntimeError(
+                f"Target table {target} already exists; pass --overwrite to replace it."
+            )
 
-spark.stop()
+        LOGGER.info("Reading raw events from %s", args.hdfs_root)
+        events = read_events(spark, args.hdfs_root)
+        cleaned = transform_events(events)
+
+        spark.sql(f"CREATE DATABASE IF NOT EXISTS `{args.database}`")
+        writer = (
+            cleaned.write.mode("overwrite" if args.overwrite else "error")
+            .format("parquet")
+            .partitionBy("event_date")
+        )
+        LOGGER.info("Writing partitioned table %s", target)
+        writer.saveAsTable(target)
+        LOGGER.info("ETL completed successfully")
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+    run(parse_args())
