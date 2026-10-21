@@ -5,8 +5,6 @@ An end-to-end batch analytics pipeline for clickstream data, built with
 demonstrates how to turn raw event data into a partitioned analytical
 dataset, reusable SQL insights, and a bounded low-latency serving view.
 
-![System architecture](assets/system-architecture.png)
-
 ## Why this project
 
 This repository is intentionally focused on the engineering decisions that
@@ -22,16 +20,42 @@ matter in a production-style data platform:
 ## Architecture
 
 ```text
-CSV files
-   │
-   ▼
-HDFS ──► Spark ETL ──► Hive metastore + partitioned Parquet (sales_fact)
-                           │
-                           ├──► Hive/Spark SQL analytics
-                           └──► HBase serving sample
+                         +----------------------+
+                         |  Raw CSV files        |
+                         |  events.csv           |
+                         +----------+-----------+
+                                    |
+                                    v
+                         +----------------------+
+                         | HDFS raw zone        |
+                         +----------+-----------+
+                                    |
+                                    v
+                         +----------------------+
+                         | Spark ETL             |
+                         | schema, quality,     |
+                         | deduplication        |
+                         +----------+-----------+
+                                    |
+                                    v
+              +---------------------+---------------------+
+              |                                           |
+              v                                           v
+ +---------------------------+                +---------------------------+
+ | Hive + partitioned        |                | HBase serving sample      |
+ | Parquet: sales_fact       |                | bounded recent lookups   |
+ +-------------+-------------+                +---------------------------+
+               |
+               v
+ +---------------------------+
+ | Hive/Spark SQL analytics  |
+ | date-partition pruning    |
+ +---------------------------+
 ```
 
-![Star schema](assets/star-schema.png)
+The current ETL publishes one fact table, `sales_fact`. The source layout
+also reserves locations for category and item-property files so dimensions
+can be added without changing the ingestion boundary.
 
 | Layer | Technology | Responsibility |
 | --- | --- | --- |
@@ -139,17 +163,15 @@ spark-submit src/performance_comparison.py
 ```
 
 The optimized query filters on `event_date`, which allows Spark/Hive to
-prune unrelated partitions. Benchmark numbers depend on cluster size,
-file layout, caching, and input volume; the image below records one
-historical local run rather than a universal guarantee.
-
-![Performance summary](assets/performance-summary.png)
+prune unrelated partitions. Benchmark numbers depend on cluster size, file
+layout, caching, and input volume. The optimized query should reduce work
+when its `event_date` filter selects fewer partitions, but the exact
+improvement must be measured on the target cluster.
 
 ## Repository layout
 
 ```text
 .
-├── assets/                       # Architecture and benchmark visuals
 ├── hbase/                        # HBase schema and tuning notes
 ├── sql/                          # Warehouse analytics
 ├── src/
